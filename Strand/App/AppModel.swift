@@ -7,6 +7,9 @@ import StrandImport
 import OuraProtocol
 #if os(iOS)
 import UserNotifications
+#if canImport(UIKit)
+import UIKit
+#endif
 #endif
 
 /// Data source currently running an import from the Data Sources screen.
@@ -310,12 +313,25 @@ final class AppModel: ObservableObject {
         // Re-arm the next day's firmware alarm the moment the strap reports it fired (if/when the
         // firmware pushes STRAP_DRIVEN_ALARM_EXECUTED). Gated on enabled inside applySmartAlarm.
         live.onSmartAlarmFired = { [weak self] in
-            guard let self, self.behavior.smartAlarmEnabled else { return }
+            guard let self else { return }
+            let source = UserDefaults.standard.string(forKey: PrayerAlarm.K.armedSource)
+            guard self.behavior.smartAlarmEnabled || PrayerAlarm.anyEnabled else { return }
             // PR #577 (iOS): mirror the strap's wake buzz to a local notification so a phone-in-pocket
-            // user still gets woken; no-op on macOS / when wrist alerts are off.
-            AppModel.postSmartAlarm()
+            // user still gets woken; no-op on macOS / when wrist alerts are off. Only for the smart alarm
+            // itself, not for a prayer buzz (personal fork).
+            if source == "Smart" { AppModel.postSmartAlarm() }
+            if source == "Test" { UserDefaults.standard.removeObject(forKey: PrayerAlarm.K.testUntil) }
             self.applySmartAlarm()
         }
+        live.onAlarmArmResult = { [weak self] r in self?.handleAlarmArmResult(r) }
+        // Personal fork: a prayer buzz can fire while iOS has NOOP suspended, when the fired event is
+        // never seen. New strap data arriving (a background sync) is the next chance to move the slot on,
+        // so re-run the funnel once the armed instant has passed.
+        repo.$days.dropFirst().sink { [weak self] _ in
+            guard let self, PrayerAlarm.anyEnabled else { return }
+            let at = UserDefaults.standard.double(forKey: PrayerAlarm.K.armedAt)
+            if at > 0, at < Date().timeIntervalSince1970 { self.applySmartAlarm() }
+        }.store(in: &hrCancellables)
         // Strap battery alerts (#368): low-battery warning + full-charge note. The notifier self-gates
         // on the user's setting and the OS authorization, and carries its own persisted once-per-
         // crossing state, so feeding it every battery reading is safe.
@@ -386,7 +402,7 @@ final class AppModel: ObservableObject {
         // `disarmPending` latches exactly that dropped write, so this stays a no-op for the many users who
         // never armed one (re-running unconditionally would put a DISABLE_ALARM on every connect).
         live.$connectSettled.dropFirst().sink { [weak self] _ in
-            guard let self, self.behavior.smartAlarmEnabled || self.ble.disarmPending else { return }
+            guard let self, self.behavior.smartAlarmEnabled || PrayerAlarm.anyEnabled || self.ble.disarmPending else { return }
             self.applySmartAlarm()
         }.store(in: &hrCancellables)
         // The firmware alarm is a single absolute instant with no recurrence, and was re-armed ONLY on
@@ -1695,30 +1711,84 @@ final class AppModel: ObservableObject {
 
     func applySmartAlarm() {
         let overrides = WindDownNudge.perDayWakeOverrides
-        guard behavior.smartAlarmEnabled else {
-            ble.disableStrapAlarm()
-            Self.cancelSmartAlarmBackupNotification()
-            return
+        let now = Date()
+        // Personal fork: the strap has ONE alarm slot, shared by the weekday smart alarm, the Fajr alarm
+        // and the prayer buzzes. Arm whichever comes first; the fired event / reconnect / foreground /
+        // daily re-arm all come back through here and move the slot on to the next one.
+        var smartNext: Date?
+        if behavior.smartAlarmEnabled {
+            smartNext = Self.nextSmartAlarmDate(minutes: behavior.smartAlarmMinutes,
+                                                weekdays: behavior.smartAlarmWeekdays,
+                                                overrides: overrides,
+                                                from: now)
         }
-        guard let next = Self.nextSmartAlarmDate(minutes: behavior.smartAlarmMinutes,
-                                                 weekdays: behavior.smartAlarmWeekdays,
-                                                 overrides: overrides) else {
-            // No enabled weekday in the next week (only possible from a corrupted set) , disarm rather
-            // than arm a misleading time the user never asked for.
-            ble.disableStrapAlarm()
+        // The smart alarm only actually arms a 5/MG with Protocol probes on, so an unarmable smart alarm
+        // must not win the slot over a prayer alarm that WILL arm.
+        let smartWillArm = !(whoop5Detected && !PuffinExperiment.isEnabled)
+        let prayerPlan = PrayerAlarm.nextPlan(after: now)
+
+        if smartNext != nil {
+            // Replace (remove + re-add by stable identifier) on every re-arm so the backup never stacks.
+            // The log sink hops to the main actor because the auth check completes off-main and LiveState is
+            // @MainActor - the same Task hop the importTraceSink uses.
+            Self.scheduleSmartAlarmBackupNotification(minutes: behavior.smartAlarmMinutes,
+                                                      weekdays: behavior.smartAlarmWeekdays,
+                                                      overrides: overrides,
+                                                      log: { [weak self] line in
+                                                          Task { @MainActor in self?.live.append(log: line) }
+                                                      })
+        } else {
             Self.cancelSmartAlarmBackupNotification()
-            return
         }
-        ble.armStrapAlarm(at: next)
-        // Replace (remove + re-add by stable identifier) on every re-arm so the backup never stacks.
-        // The log sink hops to the main actor because the auth check completes off-main and LiveState is
-        // @MainActor - the same Task hop the importTraceSink uses.
-        Self.scheduleSmartAlarmBackupNotification(minutes: behavior.smartAlarmMinutes,
-                                                  weekdays: behavior.smartAlarmWeekdays,
-                                                  overrides: overrides,
-                                                  log: { [weak self] line in
-                                                      Task { @MainActor in self?.live.append(log: line) }
-                                                  })
+
+        let d = UserDefaults.standard
+        if let plan = prayerPlan, smartNext == nil || !smartWillArm || plan.date < smartNext! {
+            let custom = plan.haptics != PrayerTimes.stockPattern
+            ble.armStrapAlarm(at: plan.date, haptics: plan.haptics, bypassExperimentGate: true)
+            d.set(plan.label, forKey: PrayerAlarm.K.armedSource)
+            d.set(custom, forKey: PrayerAlarm.K.armedCustom)
+            d.set(plan.date.timeIntervalSince1970, forKey: PrayerAlarm.K.armedAt)
+            live.append(log: "Prayer alarm: strap slot holds \(plan.label) at \(plan.date)")
+        } else if let next = smartNext {
+            ble.armStrapAlarm(at: next)
+            d.set("Smart", forKey: PrayerAlarm.K.armedSource)
+            d.set(false, forKey: PrayerAlarm.K.armedCustom)
+            d.set(next.timeIntervalSince1970, forKey: PrayerAlarm.K.armedAt)
+        } else {
+            // Nothing wants the slot (or the smart alarm's weekday set is corrupt): disarm rather than
+            // leave a misleading time armed.
+            ble.disableStrapAlarm()
+            d.removeObject(forKey: PrayerAlarm.K.armedSource)
+            d.removeObject(forKey: PrayerAlarm.K.armedAt)
+        }
+
+        // Keep the prayer-time cache topped up (a month and the next). A successful refresh re-runs this
+        // funnel so a newly fetched time can take the slot. Rate-limited inside; a no-op when nothing
+        // prayer-related is on or the cache is fresh.
+        if PrayerAlarm.anyEnabled {
+            Task { @MainActor [weak self] in
+                #if os(iOS)
+                let foreground = UIApplication.shared.applicationState == .active
+                #else
+                let foreground = true
+                #endif
+                if await PrayerAlarm.refreshIfNeeded(useLocation: foreground) {
+                    self?.applySmartAlarm()
+                }
+            }
+        }
+    }
+
+    /// Personal fork: when a 5/MG refuses a custom prayer-alarm pattern, arm the same instant again
+    /// with the stock pattern so the wake is never lost.
+    func handleAlarmArmResult(_ result: Int?) {
+        let d = UserDefaults.standard
+        guard whoop5Detected, d.bool(forKey: PrayerAlarm.K.armedCustom) else { return }
+        guard let r = result, r != 1, r != 2 else { return }   // 1 = SUCCESS, 2 = PENDING
+        d.set(false, forKey: PrayerAlarm.K.armedCustom)
+        guard let plan = PrayerAlarm.nextPlan() else { return }
+        live.append(log: "Prayer alarm: strap refused the custom pattern (result \(r)), re-arming with the stock pattern")
+        ble.armStrapAlarm(at: plan.date, haptics: PrayerTimes.stockPattern, bypassExperimentGate: true)
     }
 
     /// Compute the next fire date for the smart alarm, honouring the weekday selection.

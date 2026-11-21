@@ -56,7 +56,10 @@ public enum AlarmPayload {
     ///   [6..7]   u16 LE subseconds = (ms % 1000) * 32768 / 1000   (1/32768-s fixed point)
     ///   [8..19]  haptic pattern: 8 effects + u16 LE loopControl(0) + overallLoop(7) + duration(30)
     /// ```
-    public static func setAlarmRev4(wakeEpochMs: Int64, alarmId: UInt8 = 1) -> [UInt8] {
+    ///
+    /// `haptics` (personal fork): an optional replacement for the 12-byte pattern tail. Anything that is
+    /// not exactly 12 bytes is ignored and the stock pattern is sent.
+    public static func setAlarmRev4(wakeEpochMs: Int64, alarmId: UInt8 = 1, haptics: [UInt8]? = nil) -> [UInt8] {
         // Clamp rather than trap (matches armStrapAlarm's WHOOP4 posture for absurd dates).
         let seconds = UInt32(clamping: wakeEpochMs / 1000)
         let subseconds = UInt16(clamping: (max(0, wakeEpochMs % 1000) * 32768) / 1000)
@@ -64,8 +67,8 @@ public enum AlarmPayload {
                 UInt8(seconds & 0xFF), UInt8((seconds >> 8) & 0xFF),
                 UInt8((seconds >> 16) & 0xFF), UInt8((seconds >> 24) & 0xFF),
                 UInt8(subseconds & 0xFF), UInt8((subseconds >> 8) & 0xFF)]
-            + waveformEffects
-            + [0x00, 0x00, 0x07, 30]   // loopControl u16 LE, overallLoop=7, duration=30 s
+            + ((haptics?.count == 12) ? haptics! : (waveformEffects
+            + [0x00, 0x00, 0x07, 30]))   // loopControl u16 LE, overallLoop=7, duration=30 s
     }
 
     /// DISABLE_ALARM (cmd 69) REVISION_2 body `[0x02, 0xFF]` (the 5/MG form).

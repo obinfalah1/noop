@@ -5473,7 +5473,11 @@ public final class BLEManager: NSObject, ObservableObject {
     /// HAPTICS_FIRED (60), dismissed by DOUBLE_TAP (#864, 2026-08-25, WS50_r00 FW 50.41.1.0). A second
     /// wake was reported on a 5.0 with no log and no firmware recorded (#2464). Neither has been shown
     /// to repeat, so do not promise a wake.
-    func armStrapAlarm(at date: Date) {
+    ///
+    /// Personal fork: `haptics` replaces the 5/MG 12-byte wake pattern (ignored on WHOOP 4.0), and
+    /// `bypassExperimentGate` lets the Fajr / prayer alarms arm a 5/MG without Protocol probes on. That
+    /// path was confirmed buzzing on the owner's WHOOP 5 in the Edge fork.
+    func armStrapAlarm(at date: Date, haptics: [UInt8]? = nil, bypassExperimentGate: Bool = false) {
         // Log the wake time in the user's LOCAL zone. `Date` prints in UTC by default, so an alarm
         // for (say) 07:00 in New York logged as "11:00:00 +0000" reads like a timezone bug — but it
         // isn't: SET_ALARM_TIME carries the absolute instant of the chosen local time, and the strap
@@ -5485,14 +5489,14 @@ public final class BLEManager: NSObject, ObservableObject {
             // the user has opted into Protocol probes — matching the Android
             // client, which refuses to arm it otherwise. Without this a normal 5/MG user is silently
             // armed onto an alarm that may never fire.
-            guard PuffinExperiment.isEnabled else {
+            guard PuffinExperiment.isEnabled || bypassExperimentGate else {
                 log("Alarm: 5/MG firmware alarm needs Protocol probes (Test Centre) — not armed")
                 return
             }
             // 5/MG SET_ALARM_TIME is REVISION_4: [04][id][u32 sec][u16 subsec][12-byte 47/152
             // pattern, overallLoop 7, 30 s]. No SET_CLOCK preamble (see doc comment above).
             let wakeMs = Int64((date.timeIntervalSince1970 * 1000).rounded())
-            send(.setAlarmTime, payload: AlarmPayload.setAlarmRev4(wakeEpochMs: wakeMs))
+            send(.setAlarmTime, payload: AlarmPayload.setAlarmRev4(wakeEpochMs: wakeMs, haptics: haptics))
             recordAlarmArm(sentEpoch: Int(wakeMs / 1000))
             // #34: don't claim "armed" when the strap isn't connected (the send was dropped) — the arm
             // re-fires on the next connect.

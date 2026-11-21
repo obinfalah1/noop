@@ -1,0 +1,37 @@
+# Personal fork: build the unsigned iOS IPA (Fajr alarm, prayer buzzes, Apple on-device AI) on demand.
+# Dispatch with: gh workflow run fajr-ipa.yml --ref fajr-mods
+name: Fajr IPA (iOS, unsigned)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build NOOPiOS for device (unsigned, Release)
+        run: >-
+          xcodebuild -scheme NOOPiOS -configuration Release -destination 'generic/platform=iOS'
+          -derivedDataPath build/dd
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+          build
+      - name: Package sideload .ipa
+        run: |
+          APP=$(find build/dd/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -1)
+          test -n "$APP" || { echo ".app (iphoneos) not found"; exit 1; }
+          rm -rf "$APP/Watch"
+          test -d "$APP/PlugIns/NOOPWidgets.appex" || { echo "NOOPWidgets.appex missing"; exit 1; }
+          Tools/prepare-ios-sideload-app.sh "$APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qr NOOP-fajr-ios-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NOOP-fajr-ios-unsigned
+          path: NOOP-fajr-ios-unsigned.ipa
+          retention-days: 14

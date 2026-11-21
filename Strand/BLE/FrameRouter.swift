@@ -207,6 +207,14 @@ public final class FrameRouter {
                                 + "frame=\(Self.fullFrameHex(frame))",
                              domain: .connection)
             }
+            // Personal fork: the 5/MG answer to SET_ALARM_TIME (1 = SUCCESS, 0 = FAILURE, 3 = UNSUPPORTED),
+            // so the prayer alarm can fall back to the stock haptic pattern when a custom one is refused.
+            if family == .whoop5, let cmd = parsed.cmdName, cmd.hasPrefix("SET_ALARM_TIME") {
+                let r = Self.commandResultByte(in: frame, family: family)
+                let rhex = r.map { String(format: "0x%02x", UInt8(truncatingIfNeeded: $0)) } ?? "none"
+                state.append(log: "Alarm: 5/MG strap answered the arm (SET_ALARM_TIME) with result=\(rhex)")
+                state.onAlarmArmResult?(r)
+            }
             if family == .whoop4, let cmd = parsed.cmdName {
                 if cmd.hasPrefix("TOGGLE_GENERIC_HR_PROFILE") {
                     // #2400: this is evidence that the strap answered opcode 14, not a read-back of the

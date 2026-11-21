@@ -51,6 +51,7 @@ struct SmartAlarmView: View {
                 windowHero
                 strapAlarmCard
                 strapRejectedCard   // #34: only shows when the strap keeps refusing the alarm
+                PrayerAlarmCard()   // personal fork: Fajr alarm + prayer buzzes
                 honestyCard
                 windDownCard
             }
