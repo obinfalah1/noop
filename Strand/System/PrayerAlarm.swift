@@ -43,7 +43,8 @@ enum PrayerAlarm {
     static var buzzOffsetMinutes: Int { min(max(d.integer(forKey: K.buzzOffset), 0), 60) }
     static var buzzCount: Int { let v = d.integer(forKey: K.buzzCount); return v == 0 ? 3 : min(max(v, 1), 20) }
     static func buzzEnabled(_ p: Prayer) -> Bool { d.bool(forKey: K.buzzOn(p)) }
-    static var enabledBuzzPrayers: [Prayer] { Prayer.buzzPrayers.filter(buzzEnabled) }
+    /// Fajr only in this build: the Dhuhr–Isha buzzes never take the slot, even if switched on earlier.
+    static var enabledBuzzPrayers: [Prayer] { [] }
 
     /// True when anything here wants the strap slot.
     static var anyEnabled: Bool { fajrEnabled || !enabledBuzzPrayers.isEmpty || pendingTest != nil }
