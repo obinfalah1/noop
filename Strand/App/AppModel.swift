@@ -240,6 +240,14 @@ final class AppModel: ObservableObject {
     @Published var bpm: Int?
     private var hrWindow: [(t: Date, v: Double)] = []
     private var hrCancellables = Set<AnyCancellable>()
+
+    /// Personal fork: how long the strap may still be buzzing after its alarm time. The longest pattern
+    /// the app arms (20 buzzes with the longest pause) runs about 49 s. Writing the slot while it plays
+    /// cuts the buzz off: on Edge (same band, same slot) the next prayer's re-arm, sent one second after
+    /// Fajr fired, ended the Fajr buzz after about 3 s.
+    static let alarmRingHold: TimeInterval = 60
+    /// A held re-arm is already queued (see `applySmartAlarm`).
+    private var ringHoldQueued = false
     /// Drives the READ spine off the registry's active device (#814 HIGH-1). A Devices-screen
     /// switch/remove/re-add calls `registry.setActive` DIRECTLY (not through `registerDevice`), so without
     /// this subscription the reads stayed pinned to whatever id was active at wiring time for the whole
@@ -1712,6 +1720,25 @@ final class AppModel: ObservableObject {
     func applySmartAlarm() {
         let overrides = WindDownNudge.perDayWakeOverrides
         let now = Date()
+        // Personal fork: every path (the fired event, new synced data, reconnect, foreground) lands here.
+        // While the armed instant has only just passed the strap may still be buzzing, and a write now
+        // would stop it, so wait until the longest pattern is over and run once then.
+        let armedAt = UserDefaults.standard.double(forKey: PrayerAlarm.K.armedAt)
+        let sinceAlarm = now.timeIntervalSince1970 - armedAt
+        if armedAt > 0, sinceAlarm >= -5, sinceAlarm < Self.alarmRingHold {
+            if !ringHoldQueued {
+                ringHoldQueued = true
+                let wait = Self.alarmRingHold - sinceAlarm
+                live.append(log: "Alarm: re-arm held \(Int(wait.rounded()))s, the strap may still be buzzing")
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(max(wait, 1) * 1_000_000_000))
+                    guard let self else { return }
+                    self.ringHoldQueued = false
+                    self.applySmartAlarm()
+                }
+            }
+            return
+        }
         // Personal fork: the strap has ONE alarm slot, shared by the weekday smart alarm, the Fajr alarm
         // and the prayer buzzes. Arm whichever comes first; the fired event / reconnect / foreground /
         // daily re-arm all come back through here and move the slot on to the next one.
