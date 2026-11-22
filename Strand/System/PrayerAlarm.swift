@@ -29,6 +29,7 @@ enum PrayerAlarm {
         static let armedSource = "prayer.armedSource"          // what the strap slot holds now
         static let armedCustom = "prayer.armedCustomPattern"   // the last arm used a non-stock pattern
         static let armedAt = "prayer.armedAt"                  // epoch seconds the strap slot is armed for
+        static let armedRing = "prayer.armedRingSec"           // how long the armed pattern buzzes
         static let lastFetchAttempt = "prayer.lastFetchAttempt"
         static let testUntil = "prayer.testUntil"              // a pending 1-minute test buzz
         static func buzzOn(_ p: Prayer) -> String { "prayer.buzz.\(p.rawValue.lowercased()).enabled" }

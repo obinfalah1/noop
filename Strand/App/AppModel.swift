@@ -241,8 +241,8 @@ final class AppModel: ObservableObject {
     private var hrWindow: [(t: Date, v: Double)] = []
     private var hrCancellables = Set<AnyCancellable>()
 
-    /// Personal fork: how long the strap may still be buzzing after its alarm time. The longest pattern
-    /// the app arms (20 buzzes with the longest pause) runs about 49 s. Writing the slot while it plays
+    /// Personal fork: the longest the strap may still be buzzing after its alarm time (the hold uses the
+    /// armed pattern's own length when known). The longest pattern (20 buzzes, longest pause) is ~49 s. Writing the slot while it plays
     /// cuts the buzz off: on Edge (same band, same slot) the next prayer's re-arm, sent one second after
     /// Fajr fired, ended the Fajr buzz after about 3 s.
     static let alarmRingHold: TimeInterval = 60
@@ -1724,17 +1724,34 @@ final class AppModel: ObservableObject {
         // While the armed instant has only just passed the strap may still be buzzing, and a write now
         // would stop it, so wait until the longest pattern is over and run once then.
         let armedAt = UserDefaults.standard.double(forKey: PrayerAlarm.K.armedAt)
+        let storedRing = UserDefaults.standard.double(forKey: PrayerAlarm.K.armedRing)
+        let ring = storedRing > 0 ? min(storedRing, Self.alarmRingHold) : Self.alarmRingHold
         let sinceAlarm = now.timeIntervalSince1970 - armedAt
-        if armedAt > 0, sinceAlarm >= -5, sinceAlarm < Self.alarmRingHold {
+        if armedAt > 0, sinceAlarm >= -5, sinceAlarm < ring {
             if !ringHoldQueued {
                 ringHoldQueued = true
-                let wait = Self.alarmRingHold - sinceAlarm
+                let wait = ring - sinceAlarm
                 live.append(log: "Alarm: re-arm held \(Int(wait.rounded()))s, the strap may still be buzzing")
+                // The fired event usually wakes NOOP in the background for only a few seconds; ask iOS
+                // for the extra time so the next prayer is armed before the app is suspended again.
+                #if os(iOS)
+                var bgTask = UIBackgroundTaskIdentifier.invalid
+                bgTask = UIApplication.shared.beginBackgroundTask(withName: "alarm-rearm") {
+                    UIApplication.shared.endBackgroundTask(bgTask)
+                    bgTask = .invalid
+                }
+                #endif
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: UInt64(max(wait, 1) * 1_000_000_000))
-                    guard let self else { return }
-                    self.ringHoldQueued = false
-                    self.applySmartAlarm()
+                    if let self {
+                        self.ringHoldQueued = false
+                        self.applySmartAlarm()
+                    }
+                    #if os(iOS)
+                    // Give the arm write a moment to leave before handing the time back.
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+                    #endif
                 }
             }
             return
@@ -1775,12 +1792,14 @@ final class AppModel: ObservableObject {
             d.set(plan.label, forKey: PrayerAlarm.K.armedSource)
             d.set(custom, forKey: PrayerAlarm.K.armedCustom)
             d.set(plan.date.timeIntervalSince1970, forKey: PrayerAlarm.K.armedAt)
+            d.set(PrayerTimes.ringSeconds(plan.haptics), forKey: PrayerAlarm.K.armedRing)
             live.append(log: "Prayer alarm: strap slot holds \(plan.label) at \(plan.date)")
         } else if let next = smartNext {
             ble.armStrapAlarm(at: next)
             d.set("Smart", forKey: PrayerAlarm.K.armedSource)
             d.set(false, forKey: PrayerAlarm.K.armedCustom)
             d.set(next.timeIntervalSince1970, forKey: PrayerAlarm.K.armedAt)
+            d.set(PrayerTimes.ringSeconds(PrayerTimes.stockPattern), forKey: PrayerAlarm.K.armedRing)
         } else {
             // Nothing wants the slot (or the smart alarm's weekday set is corrupt): disarm rather than
             // leave a misleading time armed.

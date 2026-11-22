@@ -128,6 +128,15 @@ enum PrayerTimes {
         return slots + [0, 0, UInt8(count), UInt8(duration)]
     }
 
+    /// How long `haptics` keeps the strap buzzing, plus a margin: the overall loop count times one
+    /// buzz (about 0.5 s) and its pauses (240 ms each). Used to hold the next re-arm until it is over.
+    static func ringSeconds(_ haptics: [UInt8]) -> TimeInterval {
+        guard haptics.count == 12 else { return 60 }
+        let pauses = haptics[0..<8].filter { $0 == 152 }.count
+        let loops = max(Int(haptics[10]), 1)
+        return Double(loops) * (0.5 + Double(pauses) * 0.24) + 5
+    }
+
     /// The stock pattern, used when the strap refuses a custom one.
     static let stockPattern: [UInt8] = [47, 152, 0, 0, 0, 0, 0, 0, 0, 0, 7, 30]
 }
