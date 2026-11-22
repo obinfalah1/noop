@@ -59,6 +59,12 @@ struct CoachView: View {
 
     /// Personal fork: true on the Coach tab, where the chips and composer dock above the tab bar.
     @Environment(\.coachDockedAboveTabBar) private var dockedAboveTabBar
+    /// Chat screen: whether the newest message is on screen (drives auto-scroll and the jump button).
+    @State private var chatAtBottom = true
+    /// Chat screen: the in-flight send, so the stop button can cancel it.
+    @State private var sendTask: Task<Void, Never>?
+    /// Chat screen: the wearer pressed stop, so the cancellation error is not shown as a failure.
+    @State private var stoppedByUser = false
 
     /// The suggestion chips, the composer and the token estimate, docked or inline.
     @ViewBuilder private var bottomControls: some View {
@@ -77,39 +83,13 @@ struct CoachView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Coach",
-                       subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
-                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
-                       // tabs carry, so Coach sits in one atmosphere. Static + non-interactive; the frosted
-                       // message/setup cards below sit on the opaque canvas and stay legible.
-                       topBackground: liquidScaffoldSky()) {
-            if coach.isConfigured {
-                connectedHeader
-                transcript
-                if let error = coach.errorText, !error.isEmpty {
-                    errorBanner(error)
-                }
-                if coach.keyRejected || showKeyEditor { keyRepairPanel }
-                // K7: show follow-up chips after each assistant reply (when the transcript is
-                // non-empty and the last message is from the assistant and not mid-send);
-                // otherwise show the initial contextual chips.
-                // Personal fork: on the Coach tab the chips and composer dock above the tab bar
-                // (see the safeAreaInset below); elsewhere they stay in the page.
-                if !dockedAboveTabBar { bottomControls }
-                // With Apple's on-device model nothing leaves the phone, so the "sent to OpenAI" note
-                // would be wrong; it is shown only for a cloud or custom provider.
-                if !coach.appleOnDevice { privacyFootnote }
-            } else {
-                setupCard
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        Group {
+            // Personal fork: on the iPhone Coach tab, a full-screen chat (header, conversation, composer
+            // docked at the bottom) like a messaging app. Setup and the pillar sheet keep the page layout.
             if dockedAboveTabBar && coach.isConfigured {
-                VStack(alignment: .leading, spacing: 10) { bottomControls }
-                    .padding(.horizontal, NoopMetrics.screenHPadding)
-                    .padding(.top, 10)
-                    .padding(.bottom, 8)
-                    .background(StrandPalette.surfaceBase.opacity(0.94))
+                chatScreen
+            } else {
+                scaffoldScreen
             }
         }
         // macOS only. On iOS these actions live in `connectionMenu` instead, because this bar is hidden for
@@ -204,6 +184,12 @@ struct CoachView: View {
         }
         // K14: haptic feedback when a reply arrives (sending goes true → false).
         .onChangeCompat(of: coach.sending) { isSending in
+            if !isSending && stoppedByUser {
+                // Stopped on purpose: not an error, and no "reply arrived" tap.
+                coach.errorText = nil
+                stoppedByUser = false
+                return
+            }
             if !isSending && !coach.messages.isEmpty {
                 triggerReplyHaptic()
             }
@@ -213,6 +199,33 @@ struct CoachView: View {
         // a conversation exists.
         .onChangeCompat(of: coach.dataConsent) { _ in
             Task { await coach.startBriefIfNeeded() }
+        }
+    }
+
+    private var scaffoldScreen: some View {
+        ScreenScaffold(title: "Coach",
+                       subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
+                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
+                       // tabs carry, so Coach sits in one atmosphere. Static + non-interactive; the frosted
+                       // message/setup cards below sit on the opaque canvas and stay legible.
+                       topBackground: liquidScaffoldSky()) {
+            if coach.isConfigured {
+                connectedHeader
+                transcript
+                if let error = coach.errorText, !error.isEmpty {
+                    errorBanner(error)
+                }
+                if coach.keyRejected || showKeyEditor { keyRepairPanel }
+                // K7: show follow-up chips after each assistant reply (when the transcript is
+                // non-empty and the last message is from the assistant and not mid-send);
+                // otherwise show the initial contextual chips.
+                bottomControls
+                // With Apple's on-device model nothing leaves the phone, so the "sent to OpenAI" note
+                // would be wrong; it is shown only for a cloud or custom provider.
+                if !coach.appleOnDevice { privacyFootnote }
+            } else {
+                setupCard
+            }
         }
     }
 
@@ -946,7 +959,7 @@ struct CoachView: View {
         guard !trimmed.isEmpty, !coach.sending else { return }
         draft = ""
         composerFocused = false
-        Task { await coach.send(trimmed) }
+        sendTask = Task { await coach.send(trimmed) }
     }
 
     /// K14: Trigger a subtle haptic when the Coach reply arrives. On iOS, a light impact feedback.
@@ -993,5 +1006,313 @@ extension EnvironmentValues {
     var coachDockedAboveTabBar: Bool {
         get { self[CoachDockedAboveTabBarKey.self] }
         set { self[CoachDockedAboveTabBarKey.self] = newValue }
+    }
+}
+
+// MARK: - Chat screen (personal fork)
+
+/// The iPhone Coach tab as a full-screen chat: a compact header, the conversation filling the screen
+/// (the wearer's turns in bubbles on the right, replies as plain full-width text), and the composer
+/// docked at the bottom above the tab bar, moving up with the keyboard.
+extension CoachView {
+    var chatScreen: some View {
+        VStack(spacing: 0) {
+            chatHeader
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.top, 6)
+                .padding(.bottom, 8)
+            Divider().overlay(StrandPalette.hairline)
+            chatConversation
+            chatBottomBar
+        }
+        .background(StrandPalette.surfaceBase.ignoresSafeArea())
+    }
+
+    private var chatHeader: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Coach")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                HStack(spacing: 5) {
+                    Circle().fill(StrandPalette.accent).frame(width: 6, height: 6)
+                    Text(LocalizedStringKey(coach.connectionLabel))
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            Button {
+                if !coach.messages.isEmpty { showClearConfirm = true }
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(coach.messages.isEmpty ? StrandPalette.textTertiary : StrandPalette.textSecondary)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(coach.messages.isEmpty || coach.sending)
+            .accessibilityLabel("New chat")
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "Coach settings"))
+            #if os(iOS)
+            connectionMenu
+            #endif
+        }
+    }
+
+    private var chatConversation: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    if coach.messages.isEmpty && !coach.sending {
+                        chatEmptyState
+                    }
+                    ForEach(coach.messages) { message in
+                        if message.role == .user || !message.text.isEmpty {
+                            chatRow(message).id(message.id)
+                        }
+                    }
+                    if chatShowsThinking {
+                        chatThinking.id("typing")
+                    }
+                    if let error = coach.errorText, !error.isEmpty {
+                        errorBanner(error)
+                    }
+                    if coach.keyRejected || showKeyEditor { keyRepairPanel }
+                    // Follow-ups sit under the latest reply only.
+                    if showFollowUpChips {
+                        followUpChips
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id("chat-bottom")
+                        .onAppear { chatAtBottom = true }
+                        .onDisappear { chatAtBottom = false }
+                }
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            #if os(iOS)
+            .scrollDismissesKeyboard(.interactively)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            #endif
+            .onTapGesture { composerFocused = false }
+            .overlay(alignment: .bottom) {
+                if !chatAtBottom && !coach.messages.isEmpty {
+                    Button {
+                        chatScrollToBottom(proxy, animated: true)
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .frame(width: 36, height: 36)
+                            .background(StrandPalette.surfaceRaised, in: Circle())
+                            .overlay(Circle().strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 10)
+                    .accessibilityLabel("Scroll to the newest message")
+                    .transition(.opacity)
+                }
+            }
+            .onAppear { chatScrollToBottom(proxy, animated: false) }
+            .onChangeCompat(of: coach.messages.count) { _ in
+                // Your own new question always comes into view; a reply only when you're already at
+                // the bottom, so reading older messages isn't interrupted.
+                if coach.messages.last?.role == .user || chatAtBottom {
+                    chatScrollToBottom(proxy, animated: true)
+                }
+            }
+            .onChangeCompat(of: coach.sending) { _ in
+                if chatAtBottom || coach.sending { chatScrollToBottom(proxy, animated: true) }
+            }
+            .onChangeCompat(of: composerFocused) { focused in
+                guard focused else { return }
+                // Let the keyboard finish rising, then keep the newest message above the composer.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    chatScrollToBottom(proxy, animated: true)
+                }
+            }
+        }
+    }
+
+    private var chatShowsThinking: Bool {
+        guard coach.sending else { return false }
+        // A streamed reply that has started speaks for itself.
+        if let last = coach.messages.last, last.role == .assistant, !last.text.isEmpty { return false }
+        return true
+    }
+
+    private var chatEmptyState: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(StrandPalette.accent)
+                .accessibilityHidden(true)
+            Text("Ask about your charge, effort, rest and workouts")
+                .font(StrandFont.title2)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Coach reads a summary of your last two weeks plus 30-day averages and recent workouts, then answers in plain language.")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !coach.appleOnDevice {
+                privacyFootnote.padding(.top, 6)
+            }
+        }
+        .padding(.top, 40)
+    }
+
+    @ViewBuilder
+    private func chatRow(_ message: ChatMessage) -> some View {
+        switch message.role {
+        case .user:
+            HStack {
+                Spacer(minLength: 56)
+                Text(message.text)
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(StrandPalette.surfaceRaised,
+                                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("You said: \(message.text)")
+        case .assistant:
+            Markdown(message.text)
+                .markdownTheme(.strand)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contextMenu {
+                    Button {
+                        #if os(macOS)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(message.text, forType: .string)
+                        #else
+                        UIPasteboard.general.string = message.text
+                        #endif
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    ShareLink(item: message.text) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    Button {
+                        saveAdvice(message.text)
+                    } label: {
+                        Label("Save to Journal", systemImage: "square.and.pencil")
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Coach said: \(message.text)")
+        }
+    }
+
+    private var chatThinking: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small).tint(StrandPalette.accent)
+            Text("Thinking…")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+        }
+        .accessibilityLabel("Coach is thinking")
+    }
+
+    private var chatBottomBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if coach.messages.isEmpty && !coach.sending {
+                suggestionChips
+            }
+            chatComposer
+            if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let tokens = coach.estimatedTokens(forDraft: draft), tokens > 8000 {
+                tokenEstimateBar(tokens)
+            }
+        }
+        .padding(.horizontal, NoopMetrics.screenHPadding)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .background(StrandPalette.surfaceBase)
+    }
+
+    /// One rounded field with the mic and send (or stop) inside it, growing to five lines.
+    private var chatComposer: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Ask Coach about your data…", text: $draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1...5)
+                .focused($composerFocused)
+                .padding(.leading, 4)
+                .padding(.vertical, 8)
+                .onSubmit { send(draft) }
+                .accessibilityLabel("Question")
+            #if os(iOS)
+            micButton
+            #endif
+            if coach.sending {
+                Button {
+                    stoppedByUser = true
+                    sendTask?.cancel()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(StrandPalette.goldDeepText)
+                        .frame(width: 36, height: 36)
+                        .background(StrandPalette.accent, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop")
+            } else {
+                let empty = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                Button {
+                    send(draft)
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(empty ? StrandPalette.textTertiary : StrandPalette.goldDeepText)
+                        .frame(width: 36, height: 36)
+                        .background(empty ? StrandPalette.surfaceInset : StrandPalette.accent, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(empty)
+                .accessibilityLabel("Send")
+            }
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
+        .padding(.vertical, 5)
+        .background(StrandPalette.surfaceRaised, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .strokeBorder(composerFocused ? StrandPalette.focusRing : StrandPalette.hairline, lineWidth: 1))
+    }
+
+    private func chatScrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        if animated {
+            withAnimation(StrandMotion.fade) { proxy.scrollTo("chat-bottom", anchor: .bottom) }
+        } else {
+            proxy.scrollTo("chat-bottom", anchor: .bottom)
+        }
     }
 }
