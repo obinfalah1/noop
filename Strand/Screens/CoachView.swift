@@ -57,6 +57,25 @@ struct CoachView: View {
     /// on each body evaluation so a fresh sync immediately updates the chips.
     private var suggestions: [String] { coach.suggestions }
 
+    /// Personal fork: true on the Coach tab, where the chips and composer dock above the tab bar.
+    @Environment(\.coachDockedAboveTabBar) private var dockedAboveTabBar
+
+    /// The suggestion chips, the composer and the token estimate, docked or inline.
+    @ViewBuilder private var bottomControls: some View {
+        // K7: follow-up chips after each assistant reply; otherwise the initial contextual chips.
+        if showFollowUpChips {
+            followUpChips
+        } else {
+            suggestionChips
+        }
+        composer
+        // K12: show a rough token estimate when the draft is non-empty.
+        if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let tokens = coach.estimatedTokens(forDraft: draft) {
+            tokenEstimateBar(tokens)
+        }
+    }
+
     var body: some View {
         ScreenScaffold(title: "Coach",
                        subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
@@ -74,20 +93,23 @@ struct CoachView: View {
                 // K7: show follow-up chips after each assistant reply (when the transcript is
                 // non-empty and the last message is from the assistant and not mid-send);
                 // otherwise show the initial contextual chips.
-                if showFollowUpChips {
-                    followUpChips
-                } else {
-                    suggestionChips
-                }
-                composer
-                // K12: show a rough token estimate when the draft is non-empty.
-                if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   let tokens = coach.estimatedTokens(forDraft: draft) {
-                    tokenEstimateBar(tokens)
-                }
-                privacyFootnote
+                // Personal fork: on the Coach tab the chips and composer dock above the tab bar
+                // (see the safeAreaInset below); elsewhere they stay in the page.
+                if !dockedAboveTabBar { bottomControls }
+                // With Apple's on-device model nothing leaves the phone, so the "sent to OpenAI" note
+                // would be wrong; it is shown only for a cloud or custom provider.
+                if !coach.appleOnDevice { privacyFootnote }
             } else {
                 setupCard
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if dockedAboveTabBar && coach.isConfigured {
+                VStack(alignment: .leading, spacing: 10) { bottomControls }
+                    .padding(.horizontal, NoopMetrics.screenHPadding)
+                    .padding(.top, 10)
+                    .padding(.bottom, 8)
+                    .background(StrandPalette.surfaceBase.opacity(0.94))
             }
         }
         // macOS only. On iOS these actions live in `connectionMenu` instead, because this bar is hidden for
@@ -959,5 +981,17 @@ struct CoachView: View {
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
         }
+    }
+}
+
+/// Personal fork: set on the Coach tab so its chips and composer dock above the tab bar.
+private struct CoachDockedAboveTabBarKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var coachDockedAboveTabBar: Bool {
+        get { self[CoachDockedAboveTabBarKey.self] }
+        set { self[CoachDockedAboveTabBarKey.self] = newValue }
     }
 }
