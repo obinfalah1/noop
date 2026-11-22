@@ -30,7 +30,7 @@ struct PrayerAlarmCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
             fajrCard
-            // Fajr only: the Dhuhr–Isha buzzes are switched off in this build.
+            buzzCard
         }
         .onChangeCompat(of: fajrOn) { on in changed(turnedOn: on) }
         .onChangeCompat(of: dhuhrOn) { on in changed(turnedOn: on) }
